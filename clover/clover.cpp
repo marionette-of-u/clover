@@ -8,6 +8,7 @@
 #include <thread>
 #include <atomic>
 #include <fstream>
+#include <algorithm>
 #include <functional>
 #include <cmath>
 #include <boost/lexical_cast.hpp>
@@ -507,7 +508,7 @@ namespace pattern{
 }
 
 //-------- 座標
-using coord_type = std::array<float, 2>;
+using coord_type = float[2];
 
 //-------- ユークリッドノルム
 float euclid_norm(float x, float y){
@@ -520,6 +521,7 @@ namespace object{
     struct task{
         T obj;
         task *next, *prev;
+        int thread;
     };
 
     template<class T>
@@ -542,76 +544,101 @@ namespace object{
     class tasklist{
     private:
         using task = task<T>;
-        std::size_t size_ = 0;
-        task active_ , *free_;
-        std::array<task, N> arr;
+        static const int thread_num = 4;
+        static const int M = N / thread_num;
+        static const int real_thread_num = thread_num + (N % thread_num == 0 ? 0 : 1);
+        std::size_t total_size_ = 0;
+        std::size_t size_[real_thread_num] = { 0 };
+        task active_[real_thread_num] , *free_[real_thread_num];
+        std::array<task, M> arr[real_thread_num];
+        int acticve_thread_count = 0;
+
+        void next_active_thread(){
+            ++acticve_thread_count;
+            if(acticve_thread_count == real_thread_num){
+                acticve_thread_count = 0;
+            }
+        }
 
     public:
         tasklist(){
-            for(int i = 0; i < N - 1; ++i){
-                arr[i].next = &arr[i + 1];
-            }
-            arr[N - 1].next = nullptr;
-            free_ = &arr[0];
+            for(int thread_count = 0; thread_count < real_thread_num; ++thread_count){
+                for(int i = 0; i < M - 1; ++i){
+                    arr[thread_count][i].next = &arr[thread_count][i + 1];
+                }
+                arr[thread_count][M - 1].next = nullptr;
+                free_[thread_count] = &arr[thread_count][0];
 
-            active_.next = &active_;
-            active_.prev = &active_;
+                active_[thread_count].next = &active_[thread_count];
+                active_[thread_count].prev = &active_[thread_count];
+            }
         }
 
         ~tasklist() = default;
 
         // タスクを生成する
         task *create_task(){
-            if(size_ == N){
-                return nullptr;
+            if(size_[acticve_thread_count] == M){
+                if(total_size_ == M * real_thread_num){
+                    return nullptr;
+                }
+                next_active_thread();
+                return create_task();
             }
-            ++size_;
-            task *t = free_;
-            free_ = free_->next;
-            active_.next->prev = t;
-            t->next = active_.next;
-            active_.next = t;
-            t->prev = &active_;
+            ++size_[acticve_thread_count];
+            ++total_size_;
+            task *t = free_[acticve_thread_count];
+            free_[acticve_thread_count] = free_[acticve_thread_count]->next;
+            active_[acticve_thread_count].next->prev = t;
+            t->next = active_[acticve_thread_count].next;
+            active_[acticve_thread_count].next = t;
+            t->prev = &active_[acticve_thread_count];
+            t->thread = acticve_thread_count;
             t->obj.ctor();
+            next_active_thread();
             return t;
         }
 
         // タスクを削除する
         task *delete_task(task *t){
             t->obj.dtor();
-            --size_;
+            --size_[t->thread];
+            --total_size_;
             task *r = t->prev, *s = t->next;
             t->prev->next = t->next;
             if(t->next){
                 t->next->prev = t->prev;
             }
-            t->next = free_;
-            free_ = t;
+            t->next = free_[t->thread];
+            free_[t->thread] = t;
             return r;
         }
 
         // クリア
         void clear(){
-            task *s = nullptr, *t = active_.next;
-            while(t != &active_){
-                static_cast<object<T>*>(&t->obj)->dtor();
-                s = t;
-                t = t->next;
+            for(int thread_count = 0; thread_count < real_thread_num; ++thread_count){
+                task *s = nullptr, *t = active_[thread_count].next;
+                while(t != &active_[thread_count]){
+                    static_cast<object<T>*>(&t->obj)->dtor();
+                    s = t;
+                    t = t->next;
+                }
+                size_[thread_count] = 0;
+                t = active_[thread_count].next;
+                if(s){
+                    s->next = free_[thread_count];
+                }
+                t->next = free_[thread_count];
+                free_[thread_count] = t;
+                active_[thread_count].next = &active_[thread_count];
+                active_[thread_count].prev = &active_[thread_count];
             }
-            size_ = 0;
-            t = active_.next;
-            if(s){
-                s->next = free_;
-            }
-            t->next = free_;
-            free_ = t;
-            active_.next = &active_;
-            active_.prev = &active_;
+            total_size_ = 0;
         }
 
         // 空か
         bool empty() const{
-            return size_ == 0;
+            return total_size_ == 0;
         }
 
         // 現在のサイズ
@@ -621,21 +648,35 @@ namespace object{
 
         // タスクを回す
         void update(){
-            task *t = active_.next;
-            while(t != &active_){
-                static_cast<object<T>*>(&t->obj)->update(t);
-                if(t != &active_){
-                    t = t->next;
-                }
+            std::thread thread_array[real_thread_num];
+            for(int thread_count = 0; thread_count < real_thread_num; ++thread_count){
+                thread_array[thread_count] = std::move(std::thread([active_ = &active_[thread_count]]{
+                    task *t = active_->next;
+                    while(t != active_){
+                        static_cast<object<T>*>(&t->obj)->update(t);
+                        if(t != active_){
+                            t = t->next;
+                        }
+                    }
+                }));
+            }
+
+            for(int i = 0; i < real_thread_num; ++i){
+                thread_array[i].join();
             }
         }
 
         // 描画タスクを回す
         void draw() const{
-            task *t = active_.next;
-            while(t != &active_){
-                static_cast<object<T>*>(&t->obj)->draw();
-                t = t->next;
+            std::thread thread_array[real_thread_num];
+            for(int thread_count = 0; thread_count < real_thread_num; ++thread_count){
+                task *t = active_[thread_count].next;
+                while(t != &active_[thread_count]){
+                    static_cast<object<T>*>(&t->obj)->draw();
+                    if(t != &active_[thread_count]){
+                        t = t->next;
+                    }
+                }
             }
         }
     };
@@ -646,13 +687,17 @@ namespace object{
     };
 
     point_type make_point(float x, float y){
-        return point_type{ coord_type{ x, y }, tri.atan2(y, x) };
+        point_type r;
+        r.coord[0] = x;
+        r.coord[1] = y;
+        r.omega = tri.atan2(y, x);
+        return r;
     }
 
     // 火花
     struct spark : public object<spark>{
         // 基本パーティクル数
-        static const int particle_num = 12;
+        static const int particle_num = 6;
 
         using tasklist_type = tasklist<spark, 1024 * particle_num>;
         static tasklist_type &tasklist(){
@@ -714,7 +759,7 @@ namespace object{
     };
 
     // バレットアローフレーム
-    std::array<point_type, 4> bullet_arrow_frame = {
+    volatile point_type bullet_arrow_frame[4] = {
         make_point(+7 * 1.25, +0),
         make_point(-3 * 1.25, +5 * 1.25),
         make_point(-5 * 1.25, +0),
@@ -725,7 +770,7 @@ namespace object{
     void basic_bullet_arrow_draw(const coord_type &c, tri_type::angle_t omega, unsigned int color){
         float r = euclid_norm(bullet_arrow_frame[0].coord[0], bullet_arrow_frame[0].coord[1]);
         float px = r * tri.cos(bullet_arrow_frame[0].omega + omega), py = r * tri.sin(bullet_arrow_frame[0].omega + omega), qx, qy;
-        for(std::size_t i = 1; i < bullet_arrow_frame.size(); ++i){
+        for(std::size_t i = 1; i < sizeof(bullet_arrow_frame) / sizeof(bullet_arrow_frame[0]); ++i){
             r = euclid_norm(bullet_arrow_frame[i].coord[0], bullet_arrow_frame[i].coord[0]);
             qx = r * tri.cos(bullet_arrow_frame[i].omega + omega), qy = r * tri.sin(bullet_arrow_frame[i].omega + omega);
             DrawLine(static_cast<int>(offset_x + c[0] + px), static_cast<int>(offset_y + c[1] + py), static_cast<int>(offset_x + c[0] + qx), static_cast<int>(offset_y + c[1] + qy), color);
@@ -795,7 +840,7 @@ namespace object{
         int draw_offset =  bullet_buffer.size() / 2;
         float r = euclid_norm(bullet_arrow_frame[0].coord[0], bullet_arrow_frame[0].coord[1]);
         float px = r * tri.cos(bullet_arrow_frame[0].omega + omega), py = r * tri.sin(bullet_arrow_frame[0].omega + omega), qx, qy;
-        for(std::size_t i = 1; i < bullet_arrow_frame.size(); ++i){
+        for(std::size_t i = 1; i < sizeof(bullet_arrow_frame) / sizeof(bullet_arrow_frame[0]); ++i){
             r = euclid_norm(bullet_arrow_frame[i].coord[0], bullet_arrow_frame[i].coord[0]);
             qx = r * tri.cos(bullet_arrow_frame[i].omega + omega), qy = r * tri.sin(bullet_arrow_frame[i].omega + omega);
             draw_line_bullet_buffer(
@@ -816,16 +861,16 @@ namespace object{
 
         std::function<void(int, int)> recursive_fill = [&](int x, int y){
             bullet_buffer[x][y] = true;
-            if(!bullet_buffer[x - 1][y]){
+            if(x > 0 && !bullet_buffer[x - 1][y]){
                 recursive_fill(x - 1, y);
             }
-            if(!bullet_buffer[x + 1][y]){
+            if(x < 18 && !bullet_buffer[x + 1][y]){
                 recursive_fill(x + 1, y);
             }
-            if(!bullet_buffer[x][y - 1]){
+            if(y > 0 && !bullet_buffer[x][y - 1]){
                 recursive_fill(x, y - 1);
             }
-            if(!bullet_buffer[x][y + 1]){
+            if(y < 18 && !bullet_buffer[x][y + 1]){
                 recursive_fill(x, y + 1);
             }
         };
@@ -853,7 +898,7 @@ namespace object{
 
     // バレットアロー
     struct bullet_arrow : public object<bullet_arrow>{
-        using tasklist_type = tasklist<bullet_arrow, 256 * 2>;
+        using tasklist_type = tasklist<bullet_arrow, 256 * 3>;
         static tasklist_type &tasklist(){
             static tasklist_type t;
             return t;
@@ -896,7 +941,9 @@ namespace object{
                 task<spark> *v[spark::particle_num];
                 for(int i = 0; i < spark::particle_num; ++i){
                     v[i] = spark::tasklist().create_task();
-                    v[i]->obj.color = color();
+                    if(v[i]){
+                        v[i]->obj.color = color();
+                    }
                 }
 
                 ++phase;
@@ -983,7 +1030,9 @@ namespace object{
                 task<spark> *v[spark::particle_num];
                 for(int i = 0; i < spark::particle_num; ++i){
                     v[i] = spark::tasklist().create_task();
-                    v[i]->obj.color = color();
+                    if(v[i]){
+                        v[i]->obj.color = color();
+                    }
                 }
                 if(u){
                     u->obj.coord[0] = coord[0];
@@ -1205,12 +1254,50 @@ namespace object{
     } player;
 
     // ピークスペクトラム
-    extern volatile float peek_spectrum[2][2][256];
-    volatile float peek_spectrum[2][2][256] = { 0.0 };
+    extern volatile float peek_spectrum[2][256];
+    volatile float peek_spectrum[2][256] = { 0.0 };
 
-    // ピークスペクトラム更新フラグ
-    extern volatile unsigned int peek_spectrum_mod[2][256 / sizeof(unsigned int) * 8 + (256 % sizeof(unsigned int) > 0 ? 1 : 0)];
-    volatile unsigned int peek_spectrum_mod[2][256 / sizeof(unsigned int) * 8 + (256 % sizeof(unsigned int) > 0 ? 1 : 0)] = { 0 };
+    // 最近のフレームのスペクトラムのキャッシュ
+    const int spectrum_cache_num = 3;
+    std::unique_ptr<float[]> spectrum_cache[2][spectrum_cache_num];
+
+    void update_spectrum_cache(){
+        for(int i = 0; i < spectrum_cache_num - 1; ++i){
+            for(int j = 0; j < 256; ++j){
+                spectrum_cache[0][i].get()[j] = spectrum_cache[0][i + 1].get()[j];
+                spectrum_cache[1][i].get()[j] = spectrum_cache[1][i + 1].get()[j];
+            }
+        }
+        for(int i = 0; i < 256; ++i){
+            spectrum_cache[0][spectrum_cache_num - 1].get()[i] = peek_spectrum[0][i];
+            spectrum_cache[1][spectrum_cache_num - 1].get()[i] = peek_spectrum[1][i];
+        }
+
+        for(int spectrum_count = 0; spectrum_count < 256; ++spectrum_count){
+            for(int i = 0; i < 2; ++i){
+                float orth_spectrum[spectrum_cache_num];
+                for(int j = 0; j < spectrum_cache_num; ++j){
+                    orth_spectrum[j] = spectrum_cache[i][j].get()[spectrum_count];
+                }
+                std::sort(orth_spectrum, orth_spectrum + spectrum_cache_num - 1);
+                float v = std::log(peek_spectrum[i][spectrum_count]) / std::log(orth_spectrum[0]);
+                if(orth_spectrum[0] > 0.0 && v >= 2.0){
+                    task<sub_bullet_arrow> *t = sub_bullet_arrow::tasklist().create_task();
+                    if(t){
+                        //t->obj.coord[0] = player.coord[0];
+                        //t->obj.coord[1] = player.coord[1];
+                        t->obj.coord[0] = field_width / 2;
+                        t->obj.coord[1] = field_height / 2;
+
+                        t->obj.speed[0] = (i == 0 ? +1 : -1) * tri.cos(spectrum_count) * sub_bullet_arrow::speed_coe();
+                        t->obj.speed[1] = (i == 0 ? +1 : -1) * tri.sin(spectrum_count) * sub_bullet_arrow::speed_coe();
+
+                        t->obj.set_omega();
+                    }
+                }
+            }
+        }
+    }
 }
 
 //-------- sound test
@@ -1218,6 +1305,11 @@ void sound_test();
 
 //-------- WinMain
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int){
+    for(int i = 0; i < object::spectrum_cache_num; ++i){
+        object::spectrum_cache[0][i].reset(new float[256]{ 0.0 });
+        object::spectrum_cache[1][i].reset(new float[256]{ 0.0 });
+    }
+
     // init PortAudio
     if(Pa_Initialize() != paNoError){
         return -1;
@@ -1250,8 +1342,6 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int){
         main_graphic_handle = MakeScreen(screen_width, screen_height);
 
         object::player.ctor();
-        int count = 0;
-        tri_type::angle_t omega = 0;
 
         for(; ; ){
             input_manager();
@@ -1265,26 +1355,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int){
             object::bullet_arrow::tasklist().update();
             object::spark::tasklist().update();
 
-            ++count;
-            omega += tri.pi * 2 / 256;
-            if(omega >= tri.pi * 2){
-                omega = 0;
-            }
-            if(count >= 2){
-                count = 0;
-                for(int i = 0; i < 2; ++i){
-                    object::task<object::sub_bullet_arrow> *t = object::sub_bullet_arrow::tasklist().create_task();
-                    if(t){
-                        t->obj.coord[0] = field_width / 2.0;
-                        t->obj.coord[1] = field_height / 2.0;
-
-                        t->obj.speed[0] = (i == 0 ? +1 : -1) * tri.cos(omega - tri.pi) * object::sub_bullet_arrow::speed_coe();
-                        t->obj.speed[1] = (i == 0 ? +1 : -1) * tri.sin(omega - tri.pi) * object::sub_bullet_arrow::speed_coe();
-
-                        t->obj.set_omega();
-                    }
-                }
-            }
+            object::update_spectrum_cache();
 
             //-------- draw
             // クリア
@@ -1296,17 +1367,17 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int){
                 DrawLine(
                     0,
                     (screen_height - 256) / 2 + i,
-                    static_cast<int>(object::peek_spectrum[0][0][i] * screen_width / 2),
+                    static_cast<int>(object::peek_spectrum[0][i] * screen_width / 2),
                     (screen_height - 256) / 2 + i,
-                    GetColor(192, 192, 192)
-                    );
+                    GetColor(0xE0, 0xE0, 0xE0)
+                );
                 DrawLine(
                     screen_width - 1,
                     (screen_height - 256) / 2 + i,
-                    screen_width - static_cast<int>(object::peek_spectrum[0][1][i] * screen_width / 2) - 1,
+                    screen_width - static_cast<int>(object::peek_spectrum[1][i] * screen_width / 2) - 1,
                     (screen_height - 256) / 2 + i,
-                    GetColor(192, 192, 192)
-                    );
+                    GetColor(0xE0, 0xE0, 0xE0)
+                );
             }
 
             // フィールドの描画
@@ -1340,11 +1411,13 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int){
             );
 
             // オブジェクトの描画
+            //object::player.draw();
             object::bullet_arrow::tasklist().draw();
-            object::player.draw();
             object::sub_bullet_arrow::tasklist().draw();
             object::spark::tasklist().draw();
-            DrawGraph((screen_width - pattern::title->width()) / 2, (screen_height - pattern::title->height()) / 2, pattern::title->get(), FALSE);
+
+            // ロゴ
+            //DrawGraph((screen_width - pattern::title->width()) / 2, (screen_height - pattern::title->height()) / 2, pattern::title->get(), FALSE);
 
             // FPSの表示
             {

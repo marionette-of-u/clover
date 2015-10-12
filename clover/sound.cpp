@@ -15,8 +15,7 @@
 extern std::atomic<bool> is_running;
 
 namespace object{
-    extern volatile float peek_spectrum[2][2][256];
-    extern volatile unsigned int peek_spectrum_mod[2][256 / sizeof(unsigned int) * 8 + (256 % sizeof(unsigned int) > 0 ? 1 : 0)];
+    extern volatile float peek_spectrum[2][256];
 }
 
 #define PA_SAMPLE_TYPE paFloat32
@@ -104,7 +103,6 @@ extern float fft_max_power;
 float fft_max_power = 0.0;
 
 float power(const complex_t &c){
-    //return (c * std::conj(c) / static_cast<float>(spectrum_length)).real();
     return c.real() * c.real() + c.imag() * c.imag();
 }
 
@@ -134,14 +132,14 @@ void sound_test(){
     using namespace std::literals;
     PaError err;
 
-    std::unique_ptr<AudioDecoder> decoder(new AudioDecoder("zubi.mp4"));
+    std::unique_ptr<AudioDecoder> decoder(new AudioDecoder("SelfDestruction.mp3"));
     decoder->open();
     ch_num = decoder->channels();
 
     progress = 0.0;
     progress_per_samples = 0;
     
-    PaStreamParameters outputParameters; 
+    PaStreamParameters outputParameters;
     outputParameters.device = Pa_GetDefaultOutputDevice();
     outputParameters.channelCount = decoder->channels();
     outputParameters.sampleFormat = PA_SAMPLE_TYPE;
@@ -208,7 +206,7 @@ void sound_test(){
             }
         }
 
-        const int spectrum_size = sizeof(object::peek_spectrum[0][0]) / sizeof(object::peek_spectrum[0][0][0]);
+        const int spectrum_size = sizeof(object::peek_spectrum[0]) / sizeof(object::peek_spectrum[0][0]);
         for(int i = 0; i < spectrum_size; ++i){
             for(int ch = 0; ch < 2; ++ch){
                 if(ch == 1 && ch_num == 1){
@@ -219,14 +217,7 @@ void sound_test(){
                 for(int j = 0; j < buffer_length / spectrum_size; ++j){
                     sum += volume[ch][i * (buffer_length / spectrum_size) + j];
                 }
-                object::peek_spectrum[0][ch][i] = sum;
-
-                if(object::peek_spectrum[0][ch][i] > object::peek_spectrum[1][ch][i]){
-                    object::peek_spectrum_mod[ch][i / sizeof(unsigned int)] |= 1 << (i % sizeof(unsigned int));
-                }else{
-                    object::peek_spectrum_mod[ch][i / sizeof(unsigned int)] &= ~(1 << (i % sizeof(unsigned int)));
-                }
-                object::peek_spectrum[1][ch][i] = object::peek_spectrum[0][ch][i];
+                object::peek_spectrum[ch][i] = sum;
             }
         }
 
