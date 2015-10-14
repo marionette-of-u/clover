@@ -7,6 +7,7 @@
 #include <random>
 #include <thread>
 #include <atomic>
+#include <string>
 #include <fstream>
 #include <algorithm>
 #include <functional>
@@ -14,6 +15,7 @@
 #include <boost/lexical_cast.hpp>
 #include <portaudio.h>
 #include <DxLib.h>
+#include "audiodecoder.h"
 #include "bmp.hpp"
 
 //-------- 定数
@@ -493,16 +495,22 @@ private:
 // グラフィックパターン
 namespace pattern{
     std::unique_ptr<patter_surface_type> title;
+    std::unique_ptr<patter_surface_type> hitcount;
     std::array<std::unique_ptr<patter_surface_type>, 3> player_left, player_right, player_up, player_down;
+    std::array<std::unique_ptr<patter_surface_type>, 10> num;
 
     //グラフィックパターンをロードする
     void load_graphic(){
         title.reset(new patter_surface_type("d/title.bmp"));
+        hitcount.reset(new patter_surface_type("d/hitcount.bmp"));
         for(int i = 0; i < 3; ++i){
             player_left[i].reset(new patter_surface_type(("d/player_left_" + boost::lexical_cast<std::string>(i) + ".bmp").c_str()));
             player_right[i].reset(new patter_surface_type(("d/player_right_" + boost::lexical_cast<std::string>(i) + ".bmp").c_str()));
             player_up[i].reset(new patter_surface_type(("d/player_up_" + boost::lexical_cast<std::string>(i) + ".bmp").c_str()));
             player_down[i].reset(new patter_surface_type(("d/player_down_" + boost::lexical_cast<std::string>(i) + ".bmp").c_str()));
+        }
+        for(int i = 0; i < 10; ++i){
+            num[i].reset(new patter_surface_type(("d/" + boost::lexical_cast<std::string>(i) + ".bmp").c_str()));
         }
     }
 }
@@ -539,106 +547,76 @@ namespace object{
         virtual void update(task<T>*&) = 0;
     };
 
-    // タスクリスト
     template<class T, std::size_t N>
     class tasklist{
     private:
         using task = task<T>;
-        static const int thread_num = 4;
-        static const int M = N / thread_num;
-        static const int real_thread_num = thread_num + (N % thread_num == 0 ? 0 : 1);
-        std::size_t total_size_ = 0;
-        std::size_t size_[real_thread_num] = { 0 };
-        task active_[real_thread_num] , *free_[real_thread_num];
-        std::array<task, M> arr[real_thread_num];
-        int acticve_thread_count = 0;
-
-        void next_active_thread(){
-            ++acticve_thread_count;
-            if(acticve_thread_count == real_thread_num){
-                acticve_thread_count = 0;
-            }
-        }
+        std::size_t size_ = 0;
+        task active_ , *free_;
+        std::array<task, N> arr;
 
     public:
-        tasklist(){
-            for(int thread_count = 0; thread_count < real_thread_num; ++thread_count){
-                for(int i = 0; i < M - 1; ++i){
-                    arr[thread_count][i].next = &arr[thread_count][i + 1];
-                }
-                arr[thread_count][M - 1].next = nullptr;
-                free_[thread_count] = &arr[thread_count][0];
+        task &active = active_;
 
-                active_[thread_count].next = &active_[thread_count];
-                active_[thread_count].prev = &active_[thread_count];
+        tasklist(){
+            for(int i = 0; i < N - 1; ++i){
+                arr[i].next = &arr[i + 1];
             }
+            arr[N - 1].next = nullptr;
+            free_ = &arr[0];
+
+            active_.next = &active_;
+            active_.prev = &active_;
         }
 
         ~tasklist() = default;
 
         // タスクを生成する
         task *create_task(){
-            if(size_[acticve_thread_count] == M){
-                if(total_size_ == M * real_thread_num){
-                    return nullptr;
-                }
-                next_active_thread();
-                return create_task();
+            if(size_ == N){
+                return nullptr;
             }
-            ++size_[acticve_thread_count];
-            ++total_size_;
-            task *t = free_[acticve_thread_count];
-            free_[acticve_thread_count] = free_[acticve_thread_count]->next;
-            active_[acticve_thread_count].next->prev = t;
-            t->next = active_[acticve_thread_count].next;
-            active_[acticve_thread_count].next = t;
-            t->prev = &active_[acticve_thread_count];
-            t->thread = acticve_thread_count;
+            ++size_;
+            task *t = free_;
+            free_ = free_->next;
+            active_.next->prev = t;
+            t->next = active_.next;
+            active_.next = t;
+            t->prev = &active_;
             t->obj.ctor();
-            next_active_thread();
             return t;
         }
 
         // タスクを削除する
         task *delete_task(task *t){
             t->obj.dtor();
-            --size_[t->thread];
-            --total_size_;
+            --size_;
             task *r = t->prev, *s = t->next;
             t->prev->next = t->next;
             if(t->next){
                 t->next->prev = t->prev;
             }
-            t->next = free_[t->thread];
-            free_[t->thread] = t;
+            t->next = free_;
+            free_ = t;
             return r;
         }
 
         // クリア
         void clear(){
-            for(int thread_count = 0; thread_count < real_thread_num; ++thread_count){
-                task *s = nullptr, *t = active_[thread_count].next;
-                while(t != &active_[thread_count]){
-                    static_cast<object<T>*>(&t->obj)->dtor();
-                    s = t;
-                    t = t->next;
-                }
-                size_[thread_count] = 0;
-                t = active_[thread_count].next;
-                if(s){
-                    s->next = free_[thread_count];
-                }
-                t->next = free_[thread_count];
-                free_[thread_count] = t;
-                active_[thread_count].next = &active_[thread_count];
-                active_[thread_count].prev = &active_[thread_count];
+            if(size_ == 0){
+                return;
             }
-            total_size_ = 0;
+            while(active_.next != &active_){
+                delete_task(active_.next);
+            }
+            active_.next = &active_;
+            active_.prev = &active_;
+            size_ = 0;
         }
 
         // 空か
         bool empty() const{
-            return total_size_ == 0;
+            return size_ == 0;
         }
 
         // 現在のサイズ
@@ -648,35 +626,21 @@ namespace object{
 
         // タスクを回す
         void update(){
-            std::thread thread_array[real_thread_num];
-            for(int thread_count = 0; thread_count < real_thread_num; ++thread_count){
-                thread_array[thread_count] = std::move(std::thread([active_ = &active_[thread_count]]{
-                    task *t = active_->next;
-                    while(t != active_){
-                        static_cast<object<T>*>(&t->obj)->update(t);
-                        if(t != active_){
-                            t = t->next;
-                        }
-                    }
-                }));
-            }
-
-            for(int i = 0; i < real_thread_num; ++i){
-                thread_array[i].join();
+            task *t = active_.next;
+            while(t != &active_){
+                static_cast<object<T>*>(&t->obj)->update(t);
+                if(t != &active_){
+                    t = t->next;
+                }
             }
         }
 
         // 描画タスクを回す
         void draw() const{
-            std::thread thread_array[real_thread_num];
-            for(int thread_count = 0; thread_count < real_thread_num; ++thread_count){
-                task *t = active_[thread_count].next;
-                while(t != &active_[thread_count]){
-                    static_cast<object<T>*>(&t->obj)->draw();
-                    if(t != &active_[thread_count]){
-                        t = t->next;
-                    }
-                }
+            task *t = active_.next;
+            while(t != &active_){
+                static_cast<object<T>*>(&t->obj)->draw();
+                t = t->next;
             }
         }
     };
@@ -915,7 +879,7 @@ namespace object{
 
         // 相
         int phase;
-        static const int phase_max = 2;
+        static const int phase_max = 1;
 
         // 色
         static unsigned int color(){ return GetColor(192, 0, 0); }
@@ -1008,7 +972,7 @@ namespace object{
         tri_type::angle_t omega;
 
         // 色
-        static unsigned int color(){ return GetColor(0, 0, 192); }
+        static unsigned int color(){ return GetColor(96, 96, 192); }
 
         // 角度を設定する
         void set_omega(){
@@ -1073,6 +1037,27 @@ namespace object{
         }
     };
 
+    // ヒットカウント
+    struct hitcount_type{
+        int count;
+
+        void ctor(){
+            count = 0;
+        }
+
+        void draw() const{
+            int p[4];
+            int c = count >= 9999 ? 9999 : count;
+            for(int i = 0; i < 4; ++i){
+                p[i] = c % 10; c /= 10;
+            }
+            DrawGraph(0, 0, pattern::hitcount->get(), TRUE);
+            for(int i = 0; i < 4; ++i){
+                DrawGraph(pattern::num[0]->width() * i, pattern::hitcount->height() + 2, pattern::num[p[4 - 1 - i]]->get(), TRUE);
+            }
+        }
+    } hitcount;
+
     // プレイヤー
     struct player_type{
         // walk_count_max / 2 frameで一コマのアニメーション
@@ -1095,9 +1080,34 @@ namespace object{
         void ctor(){
             dir = dir_t::down;
             coord[0] = field_width / 2;
-            coord[1] = field_height * 3 / 4;
+            coord[1] = field_height / 2;
             move_dir = 0;
             walk_count = 0;
+        }
+
+        void collision(){
+            auto &list_manager_bullet_arrow = bullet_arrow::tasklist();
+            auto *t = list_manager_bullet_arrow.active.next;
+            while(t != &list_manager_bullet_arrow.active){
+                bool d = t->obj.coord[0] >= coord[0] && t->obj.coord[0] - 1.0 <= coord[0];
+                d = d || t->obj.coord[0] >= coord[0] - 1.0 && t->obj.coord[0] - 1.0 <= coord[0] - 1.0;
+                bool e = t->obj.coord[1] >= coord[1] && t->obj.coord[1] - 1.0 <= coord[1];
+                e = e || t->obj.coord[1] >= coord[1] - 1.0 && t->obj.coord[1] - 1.0 <= coord[1] - 1.0;
+                if(d && e){
+                    t = list_manager_bullet_arrow.delete_task(t);
+                    ++hitcount.count;
+                    task<spark> *v[spark::particle_num];
+                    for(int i = 0; i < spark::particle_num; ++i){
+                        v[i] = spark::tasklist().create_task();
+                        if(v[i]){
+                            v[i]->obj.coord[0] = coord[0];
+                            v[i]->obj.coord[1] = coord[1];
+                            v[i]->obj.color = bullet_arrow::color();
+                        }
+                    }
+                }
+                t = t->next;
+            }
         }
 
         void move(){
@@ -1207,6 +1217,7 @@ namespace object{
         }
 
         void update(){
+            collision();
             move();
         }
 
@@ -1261,7 +1272,7 @@ namespace object{
     const int spectrum_cache_num = 3;
     std::unique_ptr<float[]> spectrum_cache[2][spectrum_cache_num];
 
-    void update_spectrum_cache(){
+    void update_spectrum_cache(const coord_type &origin){
         for(int i = 0; i < spectrum_cache_num - 1; ++i){
             for(int j = 0; j < 256; ++j){
                 spectrum_cache[0][i].get()[j] = spectrum_cache[0][i + 1].get()[j];
@@ -1284,10 +1295,8 @@ namespace object{
                 if(orth_spectrum[0] > 0.0 && v >= 2.0){
                     task<sub_bullet_arrow> *t = sub_bullet_arrow::tasklist().create_task();
                     if(t){
-                        //t->obj.coord[0] = player.coord[0];
-                        //t->obj.coord[1] = player.coord[1];
-                        t->obj.coord[0] = field_width / 2;
-                        t->obj.coord[1] = field_height / 2;
+                        t->obj.coord[0] = origin[0];
+                        t->obj.coord[1] = origin[1];
 
                         t->obj.speed[0] = (i == 0 ? +1 : -1) * tri.cos(spectrum_count) * sub_bullet_arrow::speed_coe();
                         t->obj.speed[1] = (i == 0 ? +1 : -1) * tri.sin(spectrum_count) * sub_bullet_arrow::speed_coe();
@@ -1300,11 +1309,257 @@ namespace object{
     }
 }
 
-//-------- sound test
-void sound_test();
+void play_sound();
+
+//-------- ゲームループ
+class game_loop{
+public:
+    game_loop() = default;
+    virtual ~game_loop() = default;
+    virtual bool update() = 0;
+};
+
+namespace clover_system{
+    std::atomic<bool> now_playing;
+    bool on_dd = false;
+    std::unique_ptr<AudioDecoder> decoder;
+    PaStream *stream = nullptr;
+    std::thread sound_thread;
+    fps_manager fps;
+    std::unique_ptr<game_loop> current_loop;
+    std::vector<std::function<void()>> action_queue;
+}
+
+// スペクトラムの描画
+void draw_spectrum(){
+    for(int i = 0; i < 256; ++i){
+        DrawLine(
+            0,
+            (screen_height - 256) / 2 + i,
+            static_cast<int>(object::peek_spectrum[0][i] * screen_width / 2),
+            (screen_height - 256) / 2 + i,
+            GetColor(0xE0, 0xE0, 0xE0)
+        );
+        DrawLine(
+            screen_width - 1,
+            (screen_height - 256) / 2 + i,
+            screen_width - static_cast<int>(object::peek_spectrum[1][i] * screen_width / 2) - 1,
+            (screen_height - 256) / 2 + i,
+            GetColor(0xE0, 0xE0, 0xE0)
+        );
+    }
+}
+
+// フィールドの描画
+void draw_field(){
+    DrawLine(offset_x, offset_y, offset_x + field_width, offset_y, GetColor(0, 0, 0));
+    DrawLine(offset_x + field_width, offset_y, offset_x + field_width, offset_y + field_height, GetColor(0, 0, 0));
+    DrawLine(offset_x + field_width, offset_y + field_height, offset_x, offset_y + field_height, GetColor(0, 0, 0));
+    DrawLine(offset_x, offset_y + field_height, offset_x, offset_y, GetColor(0, 0, 0));
+
+    DrawLine(
+        offset_x,
+        (screen_height - field_height) / 2 + field_height,
+        offset_x,
+        screen_height,
+        GetColor(0, 0, 0)
+    );
+    DrawLine(
+        offset_x + field_width,
+        (screen_height - field_height) / 2 + field_height,
+        offset_x + field_width,
+        screen_height,
+        GetColor(0, 0, 0)
+    );
+}
+
+// プログレスの描画
+void draw_progress(){
+    DrawBox(
+        offset_x,
+        (screen_height - field_height) * 3 / 4 + field_height,
+        offset_x + static_cast<int>(progress.load() * field_width),
+        (screen_height - field_height) + field_height,
+        GetColor(0, 0, 0),
+        TRUE
+    );
+}
+
+// ロゴの描画
+void draw_logo(){
+    DrawGraph((screen_width - pattern::title->width()) / 2, (screen_height - pattern::title->height()) / 2, pattern::title->get(), FALSE);
+}
+
+//-------- シーン
+namespace scene{
+    // タイトル
+    class title : public game_loop{
+    public:
+        title(){
+            object::sub_bullet_arrow::tasklist().clear();
+            object::bullet_arrow::tasklist().clear();
+            object::spark::tasklist().clear();
+        }
+
+        bool update() override{
+            input_manager();
+            if(input_manager.push(keys::escape) || ProcessMessage() == -1){
+                return false;
+            }
+
+            //-------- proc
+            object::sub_bullet_arrow::tasklist().update();
+            object::bullet_arrow::tasklist().update();
+            object::spark::tasklist().update();
+
+            ++count;
+            omega += tri.pi * 2 / 256;
+            if(omega >= tri.pi * 2){
+                omega = 0;
+            }
+            if(count >= 2){
+                count = 0;
+                for(int i = 0; i < 2; ++i){
+                    object::task<object::sub_bullet_arrow> *t = object::sub_bullet_arrow::tasklist().create_task();
+                    if(t){
+                        t->obj.coord[0] = field_width / 2.0;
+                        t->obj.coord[1] = field_height / 2.0;
+
+                        t->obj.speed[0] = (i == 0 ? +1 : -1) * tri.cos(omega - tri.pi) * object::sub_bullet_arrow::speed_coe();
+                        t->obj.speed[1] = (i == 0 ? +1 : -1) * tri.sin(omega - tri.pi) * object::sub_bullet_arrow::speed_coe();
+
+                        t->obj.set_omega();
+                    }
+                }
+            }
+
+            //-------- draw
+            // クリア
+            SetDrawScreen(main_graphic_handle);
+            DrawBox(0, 0, screen_width, screen_height, GetColor(0xFF, 0xFF, 0xFF), TRUE);
+
+            draw_field();
+            object::sub_bullet_arrow::tasklist().draw();
+            object::bullet_arrow::tasklist().draw();
+            object::spark::tasklist().draw();
+            draw_logo();
+
+            SetDrawScreen(DX_SCREEN_FRONT);
+            DrawExtendGraph(0, 0, window_width, window_height, main_graphic_handle, FALSE);
+            clover_system::fps();
+
+            return true;
+        }
+
+    private:
+        int count = 0;
+        tri_type::angle_t omega = 0;
+    };
+
+    // ゲームループ
+    class game_main : public game_loop{
+    public:
+        game_main(){
+            object::sub_bullet_arrow::tasklist().clear();
+            object::bullet_arrow::tasklist().clear();
+            object::spark::tasklist().clear();
+            object::hitcount.ctor();
+            object::player.ctor();
+        }
+
+        bool update() override{
+            input_manager();
+            if(input_manager.push(keys::escape) || ProcessMessage() == -1){
+                return false;
+            }
+
+            //-------- proc
+            object::player.update();
+            object::sub_bullet_arrow::tasklist().update();
+            object::bullet_arrow::tasklist().update();
+            object::spark::tasklist().update();
+
+            object::update_spectrum_cache(object::player.coord);
+
+            //-------- draw
+            // クリア
+            SetDrawScreen(main_graphic_handle);
+            DrawBox(0, 0, screen_width, screen_height, GetColor(0xFF, 0xFF, 0xFF), TRUE);
+
+            draw_spectrum();
+            draw_field();
+            draw_progress();
+
+            // オブジェクトの描画
+            object::hitcount.draw();
+            object::sub_bullet_arrow::tasklist().draw();
+            object::player.draw();
+            object::bullet_arrow::tasklist().draw();
+            object::spark::tasklist().draw();
+
+            // FPSの表示
+            //{
+            //    char str[6] = { 0 };
+            //    str[0] = '0' + (static_cast<int>(clover_system::fps.real_sleep_time / 10) % 10);
+            //    str[1] = '0' + (static_cast<int>(clover_system::fps.real_sleep_time) % 10);
+            //    str[2] = '.';
+            //    str[3] = '0' + (static_cast<int>(clover_system::fps.real_sleep_time * 10) % 10);
+            //    str[4] = '0' + (static_cast<int>(clover_system::fps.real_sleep_time * 100) % 10);
+            //    DrawString(0, 0, str, GetColor(0x00, 0x00, 0x00));
+            //}
+
+            SetDrawScreen(DX_SCREEN_FRONT);
+            DrawExtendGraph(0, 0, window_width, window_height, main_graphic_handle, FALSE);
+            clover_system::fps();
+
+            return true;
+        }
+    };
+}
+
+LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp){
+    switch(msg){
+    case WM_DROPFILES:
+        {
+            HDROP hdrop = (HDROP)wp;
+            UINT u_fileno = DragQueryFile(hdrop, 0xFFFFFFFF, NULL, 0);
+            if(u_fileno > 0){
+                char path[4192];
+                DragQueryFile(hdrop, 0, path, sizeof(path));
+                clover_system::now_playing = false;
+                if(clover_system::sound_thread.joinable()){
+                    clover_system::sound_thread.join();
+                }
+                clover_system::decoder.reset(new AudioDecoder(path));
+                clover_system::on_dd = clover_system::decoder->open() != -1;
+                if(!clover_system::on_dd){
+                    clover_system::action_queue.push_back([](){
+                        clover_system::current_loop.reset(new scene::title());
+                    });
+                }else{
+                    WINDOWINFO info;
+                    GetWindowInfo(GetMainWindowHandle(), &info);
+                    SetWindowPos(GetMainWindowHandle(), HWND_TOP, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE);
+                    SetFocus(GetMainWindowHandle());
+                    clover_system::sound_thread = std::move(std::thread(play_sound));
+                    clover_system::action_queue.push_back([](){
+                        clover_system::current_loop.reset(new scene::game_main());
+                    });
+                }
+            }
+            DragFinish(hdrop);
+        }
+        break;
+
+    default:
+        return DefWindowProc(hwnd, msg, wp, lp);
+    }
+
+    return 0;
+}
 
 //-------- WinMain
-int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int){
+int WINAPI WinMain(HINSTANCE handle, HINSTANCE prev_handle, LPSTR lp_cmd, int n_cmd_show){
     for(int i = 0; i < object::spectrum_cache_num; ++i){
         object::spectrum_cache[0][i].reset(new float[256]{ 0.0 });
         object::spectrum_cache[1][i].reset(new float[256]{ 0.0 });
@@ -1323,8 +1578,16 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int){
         SetMainWindowText("音射閉域") != 0 ||
         DxLib_Init() != 0
     ){ return -1; }
+
+    SetHookWinProc(window_proc);
+
+    // init D&D
+    DragAcceptFiles(GetMainWindowHandle(), TRUE);
+
+    // init Draw
     SetTransColor(0xFF, 0, 0xFF);
     pattern::load_graphic();
+    main_graphic_handle = MakeScreen(screen_width, screen_height);
 
     // scoped guard
     struct scoped_guard_type{
@@ -1334,106 +1597,14 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int){
         }
     } scoped_guard;
 
-    WaitKey();
-    std::thread sound_test_thread(sound_test);
-
-    {
-        fps_manager fps;
-        main_graphic_handle = MakeScreen(screen_width, screen_height);
-
-        object::player.ctor();
-
-        for(; ; ){
-            input_manager();
-            if(input_manager.push(keys::escape) || ProcessMessage() == -1){
-                break;
-            }
-
-            //-------- proc
-            object::player.update();
-            object::sub_bullet_arrow::tasklist().update();
-            object::bullet_arrow::tasklist().update();
-            object::spark::tasklist().update();
-
-            object::update_spectrum_cache();
-
-            //-------- draw
-            // クリア
-            SetDrawScreen(main_graphic_handle);
-            DrawBox(0, 0, screen_width, screen_height, GetColor(0xFF, 0xFF, 0xFF), TRUE);
-
-            // スペクトラムの描画
-            for(int i = 0; i < 256; ++i){
-                DrawLine(
-                    0,
-                    (screen_height - 256) / 2 + i,
-                    static_cast<int>(object::peek_spectrum[0][i] * screen_width / 2),
-                    (screen_height - 256) / 2 + i,
-                    GetColor(0xE0, 0xE0, 0xE0)
-                );
-                DrawLine(
-                    screen_width - 1,
-                    (screen_height - 256) / 2 + i,
-                    screen_width - static_cast<int>(object::peek_spectrum[1][i] * screen_width / 2) - 1,
-                    (screen_height - 256) / 2 + i,
-                    GetColor(0xE0, 0xE0, 0xE0)
-                );
-            }
-
-            // フィールドの描画
-            DrawLine(offset_x, offset_y, offset_x + field_width, offset_y, GetColor(0, 0, 0));
-            DrawLine(offset_x + field_width, offset_y, offset_x + field_width, offset_y + field_height, GetColor(0, 0, 0));
-            DrawLine(offset_x + field_width, offset_y + field_height, offset_x, offset_y + field_height, GetColor(0, 0, 0));
-            DrawLine(offset_x, offset_y + field_height, offset_x, offset_y, GetColor(0, 0, 0));
-
-            // プログレスの描画
-            DrawLine(
-                offset_x,
-                (screen_height - field_height) / 2 + field_height,
-                offset_x,
-                screen_height,
-                GetColor(0, 0, 0)
-            );
-            DrawLine(
-                offset_x + field_width,
-                (screen_height - field_height) / 2 + field_height,
-                offset_x + field_width,
-                screen_height,
-                GetColor(0, 0, 0)
-            );
-            DrawBox(
-                offset_x,
-                (screen_height - field_height) * 3 / 4 + field_height,
-                offset_x + static_cast<int>(progress.load() * field_width),
-                (screen_height - field_height) + field_height,
-                GetColor(0, 0, 0),
-                TRUE
-            );
-
-            // オブジェクトの描画
-            //object::player.draw();
-            object::bullet_arrow::tasklist().draw();
-            object::sub_bullet_arrow::tasklist().draw();
-            object::spark::tasklist().draw();
-
-            // ロゴ
-            //DrawGraph((screen_width - pattern::title->width()) / 2, (screen_height - pattern::title->height()) / 2, pattern::title->get(), FALSE);
-
-            // FPSの表示
-            {
-                char str[6] = { 0 };
-                str[0] = '0' + (static_cast<int>(fps.real_sleep_time / 10) % 10);
-                str[1] = '0' + (static_cast<int>(fps.real_sleep_time) % 10);
-                str[2] = '.';
-                str[3] = '0' + (static_cast<int>(fps.real_sleep_time * 10) % 10);
-                str[4] = '0' + (static_cast<int>(fps.real_sleep_time * 100) % 10);
-                DrawString(0, 0, str, GetColor(0x00, 0x00, 0x00));
-            }
-
-            SetDrawScreen(DX_SCREEN_FRONT);
-            DrawExtendGraph(0, 0, window_width, window_height, main_graphic_handle, FALSE);
-            fps();
+    clover_system::current_loop.reset(new scene::title());
+    
+    // main loop
+    while(clover_system::current_loop->update()){
+        for(auto &i : clover_system::action_queue){
+            i();
         }
+        clover_system::action_queue.clear();
     }
 
     return 0;

@@ -126,14 +126,17 @@ volatile float volume_subst[2][buffer_length];
 extern volatile float *volume[2];
 volatile float *volume[2] = { volume_subst[0], volume_subst[1] };
 
-std::atomic<bool> is_playing;
+namespace clover_system{
+    extern std::atomic<bool> now_playing;
+    extern std::unique_ptr<AudioDecoder> decoder;
+    extern PaStream *stream;
+}
 
-void sound_test(){
+void play_sound(){
     using namespace std::literals;
+    using namespace clover_system;
     PaError err;
 
-    std::unique_ptr<AudioDecoder> decoder(new AudioDecoder("SelfDestruction.mp3"));
-    decoder->open();
     ch_num = decoder->channels();
 
     progress = 0.0;
@@ -164,7 +167,7 @@ void sound_test(){
         void *userData
     ) -> int{
         if(!is_running){
-            is_playing = false;
+            now_playing = false;
             return paComplete;
         }
 
@@ -228,7 +231,6 @@ void sound_test(){
         }
     };
 
-    PaStream *stream;
     err = Pa_OpenDefaultStream(
         &stream,
         0,
@@ -246,12 +248,13 @@ void sound_test(){
 
     //çƒê∂
     Pa_StartStream(stream);
-    is_playing = true;
+    now_playing = true;
 
     // ÉXÉäÅ[Év
-    while(is_playing){
+    while(now_playing){
         std::this_thread::sleep_for(1s);
     }
 
     Pa_CloseStream(stream);
+    stream = nullptr;
 }
