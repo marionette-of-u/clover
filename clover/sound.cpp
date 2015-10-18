@@ -14,6 +14,11 @@
 
 extern std::atomic<bool> is_running;
 
+namespace sound_effect{
+    extern PaStream *hit_stream;
+    extern std::unique_ptr<AudioDecoder> hit;
+}
+
 namespace object{
     extern volatile float peek_spectrum[2][256];
 }
@@ -257,4 +262,71 @@ void play_sound(){
 
     Pa_CloseStream(stream);
     stream = nullptr;
+}
+
+void play_hit_sound(){
+    sound_effect::hit->seek(0);
+    static std::atomic_bool now_playing = false;
+
+    PaError err;
+    PaStreamParameters outputParameters;
+    outputParameters.device = Pa_GetDefaultOutputDevice();
+    outputParameters.channelCount = sound_effect::hit->channels();
+    outputParameters.sampleFormat = PA_SAMPLE_TYPE;
+    outputParameters.suggestedLatency = Pa_GetDeviceInfo(outputParameters.device)->defaultLowOutputLatency;
+    outputParameters.hostApiSpecificStreamInfo = NULL;
+
+    int (*callback)(
+        const void *inputBuffer,
+        void *outputBuffer,
+        unsigned long framesPerBuffer,
+        const PaStreamCallbackTimeInfo* timeInfo,
+        PaStreamCallbackFlags statusFlags,
+        void *userData
+    );
+
+    callback = [](
+        const void *inputBuffer,
+        void *outputBuffer,
+        unsigned long frameCount,
+        const PaStreamCallbackTimeInfo* timeInfo,
+        PaStreamCallbackFlags statusFlags,
+        void *userData
+    ) -> int{
+        AudioDecoder *data = (AudioDecoder*)userData;
+        sample_t *out = (sample_t*)outputBuffer;
+        std::memset(out, 0, frameCount * data->channels() * sizeof(sample_t));
+        data->read(frameCount * data->channels(), out);
+        if(data->positionInSamples() >= data->numSamples()){
+            return paComplete;
+        }else{
+            now_playing = false;
+            return paContinue;
+        }
+    };
+
+    if(!now_playing){
+        static bool once = false;
+        if(!once){
+            err = Pa_OpenDefaultStream(
+                &sound_effect::hit_stream,
+                0,
+                sound_effect::hit->channels(),
+                paFloat32,
+                sound_effect::hit->sampleRate(),
+                buffer_length,
+                callback,
+                sound_effect::hit.get()
+            );
+            if(err != paNoError){
+                Pa_Terminate();
+                std::abort();
+            }
+            once = true;
+        }
+        now_playing = true;
+        Pa_StartStream(sound_effect::hit_stream);
+    }else{
+        Pa_StartStream(sound_effect::hit_stream);
+    }
 }

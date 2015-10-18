@@ -121,7 +121,7 @@ int AudioDecoderMediaFoundation::open()
    
     //LPCWSTR result; 
     const char* utf8Str = m_filename.c_str();
-    MultiByteToWideChar(CP_UTF8, 
+    MultiByteToWideChar(CP_ACP, 
                         0, 
                         utf8Str, 
                         -1, //assume utf8Str is NULL terminated and give us back a NULL terminated string

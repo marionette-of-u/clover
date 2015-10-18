@@ -40,14 +40,6 @@ static const int offset_x = (screen_width - field_width) / 2, offset_y = (screen
 extern std::atomic<bool> is_running;
 std::atomic<bool> is_running = true;
 
-//-------- ローケルを日本語に設定する
-struct set_locale_jp{
-    set_locale_jp(){
-        setlocale(LC_CTYPE, "");
-        std::locale::global(std::locale("japanese"));
-    }
-} set_locale_jp_instance;
-
 //-------- 三角関数テーブル
 template<typename tty_arithmetic_type_ = float> struct alib{
     using arithmetic_type = tty_arithmetic_type_;
@@ -522,6 +514,17 @@ using coord_type = float[2];
 float euclid_norm(float x, float y){
     return std::sqrt(x * x + y * y);
 }
+
+//-------- サウンド
+namespace sound_effect{
+    extern PaStream *hit_stream;
+    PaStream *hit_stream;
+    extern std::unique_ptr<AudioDecoder> hit;
+    std::unique_ptr<AudioDecoder> hit;
+}
+
+void play_sound();
+void play_hit_sound();
 
 //-------- ゲーム中で使われるオブジェクト
 namespace object{
@@ -1088,6 +1091,7 @@ namespace object{
         void collision(){
             auto &list_manager_bullet_arrow = bullet_arrow::tasklist();
             auto *t = list_manager_bullet_arrow.active.next;
+            bool hit_flag = false;
             while(t != &list_manager_bullet_arrow.active){
                 bool d = t->obj.coord[0] >= coord[0] && t->obj.coord[0] - 1.0 <= coord[0];
                 d = d || t->obj.coord[0] >= coord[0] - 1.0 && t->obj.coord[0] - 1.0 <= coord[0] - 1.0;
@@ -1096,6 +1100,7 @@ namespace object{
                 if(d && e){
                     t = list_manager_bullet_arrow.delete_task(t);
                     ++hitcount.count;
+                    hit_flag = true;
                     task<spark> *v[spark::particle_num];
                     for(int i = 0; i < spark::particle_num; ++i){
                         v[i] = spark::tasklist().create_task();
@@ -1107,6 +1112,9 @@ namespace object{
                     }
                 }
                 t = t->next;
+            }
+            if(hit_flag){
+                play_hit_sound();
             }
         }
 
@@ -1219,6 +1227,9 @@ namespace object{
         void update(){
             collision();
             move();
+            if(sound_effect::hit_interval > 0){
+                --sound_effect::hit_interval;
+            }
         }
 
         void draw(){
@@ -1308,8 +1319,6 @@ namespace object{
         }
     }
 }
-
-void play_sound();
 
 //-------- ゲームループ
 class game_loop{
@@ -1570,6 +1579,12 @@ int WINAPI WinMain(HINSTANCE handle, HINSTANCE prev_handle, LPSTR lp_cmd, int n_
         return -1;
     }
 
+    // load sound
+    sound_effect::hit.reset(new AudioDecoder("d/hit.mp3"));
+    if(sound_effect::hit->open() != 0){
+        return -1;
+    }
+
     // init DxLib
     if(
         SetOutApplicationLogValidFlag(FALSE) != 0 ||
@@ -1592,6 +1607,7 @@ int WINAPI WinMain(HINSTANCE handle, HINSTANCE prev_handle, LPSTR lp_cmd, int n_
     // scoped guard
     struct scoped_guard_type{
         ~scoped_guard_type(){
+            Pa_CloseStream(sound_effect::hit_stream);
             DxLib_End();
             Pa_Terminate();
         }
